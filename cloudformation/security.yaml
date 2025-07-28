@@ -1,0 +1,139 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Minecraft Hibernated Server - Security Groups'
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID where security groups will be created
+
+  HomeIP:
+    Type: String
+    Description: Your public IP address for SSH and Cockpit access
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/32$'
+
+  MinecraftPort:
+    Type: Number
+    Description: Port for Minecraft server connections
+    Default: 25565
+
+Resources:
+  # Security Group for Gate Proxy
+  ProxySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Gate proxy instance
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        # Minecraft connections from anywhere
+        - IpProtocol: tcp
+          FromPort: !Ref MinecraftPort
+          ToPort: !Ref MinecraftPort
+          CidrIp: 0.0.0.0/0
+          Description: Minecraft client connections
+
+        # SSH access from home IP only
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref HomeIP
+          Description: SSH access from home IP
+
+        # Health check port (internal)
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref MinecraftSecurityGroup
+          Description: Health check from Minecraft server
+
+      SecurityGroupEgress:
+        # Allow all outbound traffic
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: All outbound traffic
+
+      Tags:
+        - Key: Name
+          Value: minecraft-proxy-sg
+        - Key: Purpose
+          Value: gate-proxy-security
+
+  # Security Group for Minecraft Server
+  MinecraftSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Minecraft server instance
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        # Minecraft connections from proxy only
+        - IpProtocol: tcp
+          FromPort: !Ref MinecraftPort
+          ToPort: !Ref MinecraftPort
+          SourceSecurityGroupId: !Ref ProxySecurityGroup
+          Description: Minecraft connections from proxy
+
+        # SSH access from home IP only
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref HomeIP
+          Description: SSH access from home IP
+
+        # Cockpit web interface from home IP only
+        - IpProtocol: tcp
+          FromPort: 9090
+          ToPort: 9090
+          CidrIp: !Ref HomeIP
+          Description: Cockpit web interface
+
+        # RCON (optional, for advanced management)
+        - IpProtocol: tcp
+          FromPort: 25575
+          ToPort: 25575
+          SourceSecurityGroupId: !Ref ProxySecurityGroup
+          Description: RCON from proxy
+
+      SecurityGroupEgress:
+        # Allow all outbound traffic
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: All outbound traffic
+
+      Tags:
+        - Key: Name
+          Value: minecraft-server-sg
+        - Key: Purpose
+          Value: minecraft-server-security
+
+  # Security Group Rules for Inter-communication
+  ProxyToMinecraftRule:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref MinecraftSecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref MinecraftPort
+      ToPort: !Ref MinecraftPort
+      SourceSecurityGroupId: !Ref ProxySecurityGroup
+      Description: Allow proxy to connect to Minecraft server
+
+  MinecraftToProxyHealthCheck:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ProxySecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      SourceSecurityGroupId: !Ref MinecraftSecurityGroup
+      Description: Allow Minecraft server to health check proxy
+
+Outputs:
+  ProxySecurityGroupId:
+    Description: Security Group ID for Gate proxy
+    Value: !Ref ProxySecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-ProxySecurityGroup'
+
+  MinecraftSecurityGroupId:
+    Description: Security Group ID for Minecraft server
+    Value: !Ref MinecraftSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-MinecraftSecurityGroup'

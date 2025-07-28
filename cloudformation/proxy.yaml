@@ -1,0 +1,325 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Minecraft Hibernated Server - Gate Proxy Instance'
+
+Parameters:
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH access
+
+  ProxyInstanceType:
+    Type: String
+    Description: EC2 instance type for Gate proxy
+    Default: 't4g.nano'
+
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group ID for proxy instance
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet ID for proxy instance
+
+  IAMInstanceProfile:
+    Type: String
+    Description: IAM instance profile for proxy
+
+  GitRepoUrl:
+    Type: String
+    Description: Git repository URL for source code
+
+  MinecraftPort:
+    Type: Number
+    Description: Port for Minecraft connections
+    Default: 25565
+
+Resources:
+  # Elastic IP for Gate Proxy
+  ProxyElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-proxy-eip'
+        - Key: Purpose
+          Value: gate-proxy-static-ip
+
+  # Gate Proxy Instance
+  ProxyInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Sub '{{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/arm64/hvm/ebs-gp2/ami-id}}'
+      InstanceType: !Ref ProxyInstanceType
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref IAMInstanceProfile
+      SecurityGroupIds:
+        - !Ref SecurityGroupId
+      SubnetId: !Ref SubnetId
+      
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>&1) 2>&1
+          
+          echo "Starting Gate proxy setup..."
+          
+          # Update system
+          apt-get update
+          apt-get upgrade -y
+          
+          # Install required packages
+          apt-get install -y \
+            docker.io \
+            git \
+            awscli \
+            curl \
+            wget \
+            jq \
+            unzip \
+            htop \
+            fail2ban
+          
+          # Configure Docker
+          systemctl enable docker
+          systemctl start docker
+          usermod -aG docker ubuntu
+          
+          # Install CloudWatch agent
+          wget https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+          dpkg -i amazon-cloudwatch-agent.deb
+          
+          # Create CloudWatch config
+          cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'EOF'
+          {
+            "logs": {
+              "logs_collected": {
+                "files": {
+                  "collect_list": [
+                    {
+                      "file_path": "/var/log/gate-proxy.log",
+                      "log_group_name": "/aws/ec2/${AWS::StackName}/gate-proxy",
+                      "log_stream_name": "{instance_id}/gate-proxy.log"
+                    },
+                    {
+                      "file_path": "/var/log/user-data.log",
+                      "log_group_name": "/aws/ec2/${AWS::StackName}/system",
+                      "log_stream_name": "{instance_id}/user-data.log"
+                    }
+                  ]
+                }
+              }
+            },
+            "metrics": {
+              "namespace": "MinecraftServer/Proxy",
+              "metrics_collected": {
+                "cpu": {
+                  "measurement": ["cpu_usage_idle", "cpu_usage_iowait"],
+                  "metrics_collection_interval": 60
+                },
+                "disk": {
+                  "measurement": ["used_percent"],
+                  "metrics_collection_interval": 60,
+                  "resources": ["*"]
+                },
+                "mem": {
+                  "measurement": ["mem_used_percent"],
+                  "metrics_collection_interval": 60
+                }
+              }
+            }
+          }
+          EOF
+          
+          # Start CloudWatch agent
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+            -a fetch-config \
+            -m ec2 \
+            -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json \
+            -s
+          
+          # Clone repository
+          cd /opt
+          git clone ${GitRepoUrl} minecraft-hibernated-server
+          cd minecraft-hibernated-server
+          
+          # Get Minecraft server instance ID (will be available after server stack creates)
+          # This is a chicken-and-egg problem, so we'll use a startup script
+          
+          # Create environment file template
+          cat > /etc/gate-proxy.env << 'EOF'
+          MINECRAFT_PORT=${MinecraftPort}
+          AWS_REGION=${AWS::Region}
+          STACK_NAME=${AWS::StackName}
+          # MINECRAFT_INSTANCE_ID and MINECRAFT_ELASTIC_IP will be populated by startup script
+          EOF
+          
+          # Build Gate proxy Docker image
+          cd gate-proxy
+          docker build -t gate-proxy .
+          
+          # Create startup script to get Minecraft server details
+          cat > /usr/local/bin/gate-proxy-startup.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          
+          # Wait for Minecraft server stack to be created
+          echo "Waiting for Minecraft server instance to be available..."
+          
+          MAX_ATTEMPTS=30
+          ATTEMPT=0
+          
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            # Query CloudFormation for Minecraft server instance ID
+            MINECRAFT_INSTANCE_ID=$(aws cloudformation describe-stacks \
+              --region ${AWS::Region} \
+              --stack-name ${AWS::StackName} \
+              --query 'Stacks[0].Outputs[?OutputKey==`MinecraftInstanceId`].OutputValue' \
+              --output text 2>/dev/null || echo "")
+            
+            MINECRAFT_ELASTIC_IP=$(aws cloudformation describe-stacks \
+              --region ${AWS::Region} \
+              --stack-name ${AWS::StackName} \
+              --query 'Stacks[0].Outputs[?OutputKey==`MinecraftServerIP`].OutputValue' \
+              --output text 2>/dev/null || echo "")
+            
+            if [ -n "$MINECRAFT_INSTANCE_ID" ] && [ -n "$MINECRAFT_ELASTIC_IP" ] && \
+               [ "$MINECRAFT_INSTANCE_ID" != "None" ] && [ "$MINECRAFT_ELASTIC_IP" != "None" ]; then
+              echo "Found Minecraft server: $MINECRAFT_INSTANCE_ID ($MINECRAFT_ELASTIC_IP)"
+              
+              # Update environment file
+              echo "MINECRAFT_INSTANCE_ID=$MINECRAFT_INSTANCE_ID" >> /etc/gate-proxy.env
+              echo "MINECRAFT_ELASTIC_IP=$MINECRAFT_ELASTIC_IP" >> /etc/gate-proxy.env
+              
+              # Start Gate proxy service
+              systemctl start gate-proxy
+              break
+            fi
+            
+            echo "Minecraft server not ready yet, waiting... (attempt $((ATTEMPT+1))/$MAX_ATTEMPTS)"
+            sleep 30
+            ATTEMPT=$((ATTEMPT+1))
+          done
+          
+          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+            echo "ERROR: Failed to find Minecraft server after $MAX_ATTEMPTS attempts"
+            exit 1
+          fi
+          EOF
+          
+          chmod +x /usr/local/bin/gate-proxy-startup.sh
+          
+          # Create systemd service for Gate proxy
+          cat > /etc/systemd/system/gate-proxy.service << 'EOF'
+          [Unit]
+          Description=Gate Minecraft Proxy
+          After=docker.service network.target
+          Requires=docker.service
+          
+          [Service]
+          Type=simple
+          User=root
+          EnvironmentFile=/etc/gate-proxy.env
+          ExecStart=/usr/bin/docker run --rm --name gate-proxy \
+            -p ${MinecraftPort}:25565 \
+            -e MINECRAFT_INSTANCE_ID=\${MINECRAFT_INSTANCE_ID} \
+            -e MINECRAFT_ELASTIC_IP=\${MINECRAFT_ELASTIC_IP} \
+            -e AWS_REGION=\${AWS_REGION} \
+            -e MINECRAFT_PORT=\${MINECRAFT_PORT} \
+            gate-proxy
+          ExecStop=/usr/bin/docker stop gate-proxy
+          Restart=always
+          RestartSec=10
+          StandardOutput=append:/var/log/gate-proxy.log
+          StandardError=append:/var/log/gate-proxy.log
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          # Create systemd service for startup script
+          cat > /etc/systemd/system/gate-proxy-startup.service << 'EOF'
+          [Unit]
+          Description=Gate Proxy Startup Configuration
+          After=network.target
+          
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/gate-proxy-startup.sh
+          RemainAfterExit=yes
+          StandardOutput=journal
+          StandardError=journal
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          # Enable services
+          systemctl daemon-reload
+          systemctl enable docker
+          systemctl enable gate-proxy
+          systemctl enable gate-proxy-startup
+          
+          # Configure fail2ban for SSH protection
+          cat > /etc/fail2ban/jail.local << 'EOF'
+          [DEFAULT]
+          bantime = 1h
+          findtime = 10m
+          maxretry = 3
+          
+          [sshd]
+          enabled = true
+          port = ssh
+          logpath = %(sshd_log)s
+          backend = %(sshd_backend)s
+          EOF
+          
+          systemctl enable fail2ban
+          systemctl start fail2ban
+          
+          # Associate Elastic IP
+          INSTANCE_ID=$(ec2-metadata --instance-id | cut -d ' ' -f 2)
+          aws ec2 associate-address \
+            --instance-id $INSTANCE_ID \
+            --allocation-id ${ProxyElasticIP.AllocationId} \
+            --region ${AWS::Region}
+          
+          # Start the startup service (which will start gate-proxy when ready)
+          systemctl start gate-proxy-startup
+          
+          echo "Gate proxy setup complete!"
+
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 8
+            VolumeType: gp3
+            DeleteOnTermination: true
+            Encrypted: true
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-proxy'
+        - Key: Purpose
+          Value: gate-proxy
+        - Key: CostCenter
+          Value: minecraft-hibernated-server
+
+Outputs:
+  InstanceId:
+    Description: Gate proxy instance ID
+    Value: !Ref ProxyInstance
+    Export:
+      Name: !Sub '${AWS::StackName}-ProxyInstanceId'
+
+  ElasticIP:
+    Description: Gate proxy public IP address
+    Value: !Ref ProxyElasticIP
+    Export:
+      Name: !Sub '${AWS::StackName}-ProxyElasticIP'
+
+  PrivateIP:
+    Description: Gate proxy private IP address
+    Value: !GetAtt ProxyInstance.PrivateIp
+    Export:
+      Name: !Sub '${AWS::StackName}-ProxyPrivateIP'

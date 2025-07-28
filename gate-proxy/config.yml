@@ -1,0 +1,49 @@
+# Gate Proxy Configuration for AWS Hibernated Minecraft Server
+bind: "0.0.0.0:25565"
+onlineMode: true
+
+# Connection settings optimized for waiting players
+readTimeout: 60s
+writeTimeout: 60s
+connectTimeout: 5s
+
+# Servers configuration
+servers:
+  # Main Minecraft server (will be dynamically updated by plugin)
+  main:
+    address: "127.0.0.1:25567"  # Placeholder - updated at runtime
+    restricted: false
+    
+  # Limbo server - lightweight holding area
+  limbo:
+    address: "127.0.0.1:25566"
+    restricted: false
+
+# Default server routing
+try:
+  - main
+
+# Player info forwarding
+playerInfoForwarding: legacy
+
+# Compression settings
+compression:
+  threshold: 256
+  level: -1
+
+# MOTD
+motd: |
+  §6§lMinecraft Server
+  §7Auto-start enabled - Click to join!
+
+# Player count settings
+showMaxPlayers: 20
+onlineMode: true
+
+# Advanced settings
+connectionsPerIp: 4
+readTimeout: 30s
+haproxyProtocol: false
+
+# Logging
+debug: false

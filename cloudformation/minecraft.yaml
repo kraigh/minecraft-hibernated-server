@@ -1,0 +1,477 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Minecraft Hibernated Server - Minecraft Server Instance'
+
+Parameters:
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH access
+
+  MinecraftInstanceType:
+    Type: String
+    Description: EC2 instance type for Minecraft server
+    Default: 'm8g.large'
+
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group ID for Minecraft instance
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet ID for Minecraft instance
+
+  IAMInstanceProfile:
+    Type: String
+    Description: IAM instance profile for Minecraft server
+
+  GitRepoUrl:
+    Type: String
+    Description: Git repository URL for source code
+
+  MinecraftVersion:
+    Type: String
+    Description: Minecraft server version
+    Default: 'latest'
+
+  ServerType:
+    Type: String
+    Description: Type of Minecraft server
+    Default: 'vanilla'
+
+  JavaMemory:
+    Type: String
+    Description: Java memory allocation
+    Default: '6G'
+
+  IdleMinutes:
+    Type: Number
+    Description: Minutes of inactivity before hibernation
+    Default: 20
+
+  SpotMaxPrice:
+    Type: String
+    Description: Maximum spot price (empty for on-demand price)
+    Default: ''
+
+  S3BackupBucket:
+    Type: String
+    Description: S3 bucket for backups
+    Default: ''
+
+  EnableBackups:
+    Type: String
+    Description: Enable S3 backups
+    Default: 'false'
+
+  ProxyElasticIP:
+    Type: String
+    Description: Gate proxy elastic IP for configuration
+
+Conditions:
+  UseSpotPricing: !Not [!Equals [!Ref SpotMaxPrice, '']]
+  BackupsEnabled: !Equals [!Ref EnableBackups, 'true']
+
+Resources:
+  # Elastic IP for Minecraft Server
+  MinecraftElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-minecraft-eip'
+        - Key: Purpose
+          Value: minecraft-server-static-ip
+
+  # Launch Template for Minecraft Server
+  MinecraftLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub '${AWS::StackName}-minecraft-template'
+      LaunchTemplateData:
+        ImageId: !Sub '{{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/arm64/hvm/ebs-gp2/ami-id}}'
+        InstanceType: !Ref MinecraftInstanceType
+        KeyName: !Ref KeyPairName
+        IamInstanceProfile:
+          Name: !Ref IAMInstanceProfile
+        SecurityGroupIds:
+          - !Ref SecurityGroupId
+        
+        BlockDeviceMappings:
+          - DeviceName: /dev/sda1
+            Ebs:
+              VolumeSize: 30
+              VolumeType: gp3
+              DeleteOnTermination: false  # Preserve world data
+              Encrypted: true
+              Iops: 3000
+              Throughput: 125
+
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -e
+            exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>&1) 2>&1
+            
+            echo "Starting Minecraft server setup..."
+            
+            # Update system
+            apt-get update
+            apt-get upgrade -y
+            
+            # Install required packages
+            apt-get install -y \
+              openjdk-17-jre-headless \
+              openjdk-17-jdk-headless \
+              git \
+              curl \
+              wget \
+              awscli \
+              cockpit \
+              cockpit-ws \
+              cockpit-systemd \
+              htop \
+              iotop \
+              screen \
+              rsync \
+              jq \
+              unzip \
+              fail2ban \
+              ufw
+            
+            # Configure firewall
+            ufw --force enable
+            ufw allow 22/tcp
+            ufw allow 9090/tcp
+            ufw allow ${MinecraftPort}/tcp
+            ufw allow from ${ProxyElasticIP} to any port ${MinecraftPort}
+            
+            # Install CloudWatch agent
+            wget https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+            dpkg -i amazon-cloudwatch-agent.deb
+            
+            # Create CloudWatch config
+            cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'EOF'
+            {
+              "logs": {
+                "logs_collected": {
+                  "files": {
+                    "collect_list": [
+                      {
+                        "file_path": "/srv/minecraft/logs/latest.log",
+                        "log_group_name": "/aws/ec2/${AWS::StackName}/minecraft-server",
+                        "log_stream_name": "{instance_id}/minecraft.log",
+                        "timezone": "UTC"
+                      },
+                      {
+                        "file_path": "/var/log/user-data.log",
+                        "log_group_name": "/aws/ec2/${AWS::StackName}/system",
+                        "log_stream_name": "{instance_id}/user-data.log"
+                      }
+                    ]
+                  }
+                }
+              },
+              "metrics": {
+                "namespace": "MinecraftServer/Instance",
+                "metrics_collected": {
+                  "cpu": {
+                    "measurement": ["cpu_usage_idle", "cpu_usage_iowait", "cpu_usage_user", "cpu_usage_system"],
+                    "metrics_collection_interval": 60
+                  },
+                  "disk": {
+                    "measurement": ["used_percent", "inodes_free"],
+                    "metrics_collection_interval": 60,
+                    "resources": ["*"]
+                  },
+                  "diskio": {
+                    "measurement": ["io_time", "read_bytes", "write_bytes", "reads", "writes"],
+                    "metrics_collection_interval": 60,
+                    "resources": ["*"]
+                  },
+                  "mem": {
+                    "measurement": ["mem_used_percent", "mem_available_percent"],
+                    "metrics_collection_interval": 60
+                  },
+                  "netstat": {
+                    "measurement": ["tcp_established", "tcp_time_wait"],
+                    "metrics_collection_interval": 60
+                  },
+                  "swap": {
+                    "measurement": ["swap_used_percent"],
+                    "metrics_collection_interval": 60
+                  }
+                }
+              }
+            }
+            EOF
+            
+            # Start CloudWatch agent
+            /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+              -a fetch-config \
+              -m ec2 \
+              -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json \
+              -s
+            
+            # Configure hibernation support
+            echo 'GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT resume=UUID=$(findfs LABEL=cloudimg-rootfs)"' >> /etc/default/grub
+            update-grub
+            
+            # Create swap file for hibernation (match instance RAM)
+            SWAP_SIZE="8G"  # For m8g.large, adjust for other instance types
+            case "${MinecraftInstanceType}" in
+              "t4g.large"|"c8g.large"|"m8g.large") SWAP_SIZE="8G" ;;
+              "t4g.xlarge"|"c8g.xlarge"|"m8g.xlarge") SWAP_SIZE="16G" ;;
+              "m8g.2xlarge") SWAP_SIZE="32G" ;;
+            esac
+            
+            fallocate -l $SWAP_SIZE /swapfile
+            chmod 600 /swapfile
+            mkswap /swapfile
+            swapon /swapfile
+            echo '/swapfile none swap sw 0 0' >> /etc/fstab
+            
+            # Clone repository and install server components
+            cd /opt
+            git clone ${GitRepoUrl} minecraft-hibernated-server
+            cd minecraft-hibernated-server
+            chmod +x scripts/server/setup-server.sh
+            
+            # Set environment variables for setup
+            export MINECRAFT_INSTANCE_ID=$(ec2-metadata --instance-id | cut -d ' ' -f 2)
+            export MINECRAFT_ELASTIC_IP=${MinecraftElasticIP}
+            export AWS_REGION=${AWS::Region}
+            export MINECRAFT_PORT=${MinecraftPort}
+            export JAVA_MEMORY=${JavaMemory}
+            export IDLE_MINUTES=${IdleMinutes}
+            export SERVER_TYPE=${ServerType}
+            export MINECRAFT_VERSION=${MinecraftVersion}
+            export S3_BACKUP_BUCKET=${S3BackupBucket}
+            export ENABLE_BACKUPS=${EnableBackups}
+            
+            # Run setup script
+            ./scripts/server/setup-server.sh
+            
+            # Install minecraft-server (Edenhofer's systemd version)
+            wget -O /tmp/minecraft-server.deb https://github.com/Edenhofer/minecraft-server/releases/latest/download/minecraft-server_latest_all.deb
+            dpkg -i /tmp/minecraft-server.deb || apt-get install -f -y
+            
+            # Configure minecraft server directory
+            mkdir -p /srv/minecraft
+            chown minecraft:minecraft /srv/minecraft
+            chmod 755 /srv/minecraft
+            
+            # Download Minecraft server jar based on version and type
+            cd /srv/minecraft
+            case "${ServerType}" in
+              "vanilla")
+                if [ "${MinecraftVersion}" = "latest" ]; then
+                  # Get latest release version
+                  LATEST_VERSION=$(curl -s https://launcher.mojang.com/mc/game/version_manifest.json | jq -r '.latest.release')
+                  echo "Downloading Minecraft $LATEST_VERSION (latest)"
+                else
+                  LATEST_VERSION="${MinecraftVersion}"
+                  echo "Downloading Minecraft $LATEST_VERSION"
+                fi
+                
+                # Get server jar URL
+                VERSION_URL=$(curl -s https://launcher.mojang.com/mc/game/version_manifest.json | jq -r ".versions[] | select(.id==\"$LATEST_VERSION\") | .url")
+                SERVER_URL=$(curl -s "$VERSION_URL" | jq -r '.downloads.server.url')
+                wget -O server.jar "$SERVER_URL"
+                ;;
+              
+              "paper")
+                if [ "${MinecraftVersion}" = "latest" ]; then
+                  PAPER_VERSION=$(curl -s https://api.papermc.io/v2/projects/paper | jq -r '.versions[-1]')
+                else
+                  PAPER_VERSION="${MinecraftVersion}"
+                fi
+                
+                PAPER_BUILD=$(curl -s "https://api.papermc.io/v2/projects/paper/versions/$PAPER_VERSION" | jq -r '.builds[-1]')
+                wget -O server.jar "https://api.papermc.io/v2/projects/paper/versions/$PAPER_VERSION/builds/$PAPER_BUILD/downloads/paper-$PAPER_VERSION-$PAPER_BUILD.jar"
+                ;;
+              
+              *)
+                echo "Server type ${ServerType} not yet implemented, defaulting to vanilla"
+                LATEST_VERSION=$(curl -s https://launcher.mojang.com/mc/game/version_manifest.json | jq -r '.latest.release')
+                VERSION_URL=$(curl -s https://launcher.mojang.com/mc/game/version_manifest.json | jq -r ".versions[] | select(.id==\"$LATEST_VERSION\") | .url")
+                SERVER_URL=$(curl -s "$VERSION_URL" | jq -r '.downloads.server.url')
+                wget -O server.jar "$SERVER_URL"
+                ;;
+            esac
+            
+            # Accept EULA
+            echo "eula=true" > eula.txt
+            
+            # Create server.properties with optimized settings
+            cat > server.properties << EOF
+            # Minecraft server properties (auto-generated)
+            server-port=${MinecraftPort}
+            max-players=10
+            online-mode=true
+            white-list=false
+            spawn-protection=0
+            motd=Hibernated Minecraft Server - Auto-scaling for cost efficiency!
+            gamemode=survival
+            difficulty=normal
+            spawn-monsters=true
+            spawn-animals=true
+            spawn-npcs=true
+            pvp=true
+            enable-command-block=false
+            view-distance=10
+            simulation-distance=10
+            level-seed=
+            level-name=world
+            level-type=minecraft:normal
+            # Performance optimizations
+            network-compression-threshold=256
+            player-idle-timeout=0
+            # Enable RCON for management
+            enable-rcon=true
+            rcon.port=25575
+            rcon.password=$(openssl rand -base64 32)
+            # Logging
+            broadcast-rcon-to-ops=true
+            EOF
+            
+            # Set ownership
+            chown -R minecraft:minecraft /srv/minecraft
+            
+            # Configure systemd minecraft service with custom settings
+            cat > /etc/conf.d/minecraft << EOF
+            # Minecraft server configuration
+            SERVER_ROOT="/srv/minecraft"
+            JAVA_OPTS="-Xms1G -Xmx${JavaMemory} -XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1NewSizePercent=30 -XX:G1MaxNewSizePercent=40 -XX:G1HeapRegionSize=8M -XX:G1ReservePercent=20 -XX:G1HeapWastePercent=5 -XX:G1MixedGCCountTarget=4 -XX:InitiatingHeapOccupancyPercent=15 -XX:G1MixedGCLiveThresholdPercent=90 -XX:G1RSetUpdatingPauseTimePercent=5 -XX:SurvivorRatio=32 -XX:+PerfDisableSharedMem -XX:MaxTenuringThreshold=1 -Dusing.aikars.flags=https://mcflags.emc.gs -Daikars.new.flags=true"
+            MAIN_CLASS="net.minecraft.server.Main"
+            EOF
+            
+            # Enable and configure Cockpit
+            systemctl enable cockpit.socket
+            systemctl start cockpit.socket
+            
+            # Configure fail2ban
+            cat > /etc/fail2ban/jail.local << 'EOF'
+            [DEFAULT]
+            bantime = 1h
+            findtime = 10m
+            maxretry = 3
+            
+            [sshd]
+            enabled = true
+            port = ssh
+            logpath = %(sshd_log)s
+            backend = %(sshd_backend)s
+            EOF
+            
+            systemctl enable fail2ban
+            systemctl start fail2ban
+            
+            # Associate Elastic IP
+            INSTANCE_ID=$(ec2-metadata --instance-id | cut -d ' ' -f 2)
+            aws ec2 associate-address \
+              --instance-id $INSTANCE_ID \
+              --allocation-id ${MinecraftElasticIP.AllocationId} \
+              --region ${AWS::Region}
+            
+            # Enable minecraft service but don't start yet (will start on first connection)
+            systemctl enable minecraft
+            
+            # Create a status endpoint for the proxy to check
+            cat > /usr/local/bin/minecraft-status.sh << 'EOF'
+            #!/bin/bash
+            if systemctl is-active --quiet minecraft; then
+              echo "RUNNING"
+            else
+              echo "STOPPED"
+            fi
+            EOF
+            chmod +x /usr/local/bin/minecraft-status.sh
+            
+            # Store instance information in Systems Manager for proxy
+            aws ssm put-parameter \
+              --region ${AWS::Region} \
+              --name "/minecraft/${AWS::StackName}/instance-id" \
+              --value "$INSTANCE_ID" \
+              --type "String" \
+              --overwrite
+            
+            aws ssm put-parameter \
+              --region ${AWS::Region} \
+              --name "/minecraft/${AWS::StackName}/elastic-ip" \
+              --value "${MinecraftElasticIP}" \
+              --type "String" \
+              --overwrite
+            
+            echo "Minecraft server setup complete!"
+            echo "Instance ID: $INSTANCE_ID"
+            echo "Elastic IP: ${MinecraftElasticIP}"
+            echo "Server will start when first player connects via proxy"
+
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub '${AWS::StackName}-minecraft'
+              - Key: Purpose
+                Value: minecraft-server
+              - Key: CostCenter
+                Value: minecraft-hibernated-server
+
+  # Minecraft Server Instance
+  MinecraftInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref MinecraftLaunchTemplate
+        Version: !GetAtt MinecraftLaunchTemplate.LatestVersionNumber
+      
+      SubnetId: !Ref SubnetId
+      
+      # Spot instance configuration
+      InstanceMarketOptions: !If
+        - UseSpotPricing
+        - MarketType: spot
+          SpotOptions:
+            InstanceInterruptionBehavior: hibernate
+            SpotInstanceType: persistent
+            MaxPrice: !Ref SpotMaxPrice
+        - !Ref 'AWS::NoValue'
+      
+      # Hibernation support
+      HibernationOptions:
+        Configured: true
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-minecraft'
+        - Key: Purpose
+          Value: minecraft-server
+        - Key: AutoStart
+          Value: 'true'
+        - Key: AutoHibernate
+          Value: 'true'
+
+Outputs:
+  InstanceId:
+    Description: Minecraft server instance ID
+    Value: !Ref MinecraftInstance
+    Export:
+      Name: !Sub '${AWS::StackName}-MinecraftInstanceId'
+
+  ElasticIP:
+    Description: Minecraft server public IP address
+    Value: !Ref MinecraftElasticIP
+    Export:
+      Name: !Sub '${AWS::StackName}-MinecraftElasticIP'
+
+  PrivateIP:
+    Description: Minecraft server private IP address
+    Value: !GetAtt MinecraftInstance.PrivateIp
+    Export:
+      Name: !Sub '${AWS::StackName}-MinecraftPrivateIP'
+
+  InstanceType:
+    Description: Minecraft server instance type
+    Value: !Ref MinecraftInstanceType
+    Export:
+      Name: !Sub '${AWS::StackName}-MinecraftInstanceType'

@@ -1,0 +1,12 @@
+[Unit]
+Description=EC2 Spot Interruption Handler
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/spot-interruption-handler.sh
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

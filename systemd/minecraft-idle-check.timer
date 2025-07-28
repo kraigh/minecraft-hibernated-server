@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Minecraft server idle status
+Requires=minecraft-idle-check.service
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1min
+Unit=minecraft-idle-check.service
+
+[Install]
+WantedBy=timers.target

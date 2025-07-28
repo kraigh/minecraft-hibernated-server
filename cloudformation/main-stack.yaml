@@ -1,0 +1,343 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Minecraft Hibernated Server'
+
+Parameters:
+  DomainName:
+    Type: String
+    Description: Domain name for the Minecraft server (e.g., minecraft.example.com)
+    Default: ''
+  
+  HostedZoneId:
+    Type: String
+    Description: Route53 Hosted Zone ID (leave empty to skip DNS)
+    Default: ''
+
+  HomeIP:
+    Type: String
+    Description: Your public IP address for SSH access (e.g., 1.2.3.4/32) 
+  
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH access
+  
+  MinecraftPort:
+    Type: Number
+    Default: 25565
+    Description: Port for Minecraft server
+  
+  GitRepoUrl:
+    Type: String
+    Description: Git repository URL containing the minecraft-hibernated-server setup
+  
+  PublicSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public subnet ID for EC2 instances
+
+Conditions:
+  CreateDNS: !Not [!Equals [!Ref DomainName, '']]
+
+Resources:
+  # Security Groups
+  ProxySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for proxy instance
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref MinecraftPort
+          ToPort: !Ref MinecraftPort
+          CidrIp: 0.0.0.0/0
+          Description: Minecraft client connections
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref HomeIP  # Restrict to your IP
+          Description: SSH access
+      Tags:
+        - Key: Name
+          Value: minecraft-proxy-sg
+
+  MinecraftSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Minecraft server
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref MinecraftPort
+          ToPort: !Ref MinecraftPort
+          SourceSecurityGroupId: !Ref ProxySecurityGroup
+          Description: Allow from proxy
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref HomeIP  # Restrict to your IP
+        - IpProtocol: tcp
+          FromPort: 9090
+          ToPort: 9090
+          CidrIp: !Ref HomeIP  # Restrict to your IP
+      Tags:
+        - Key: Name
+          Value: minecraft-server-sg
+
+  # IAM Role for Proxy
+  ProxyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: MinecraftProxyPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:StartInstances
+                  - ec2:StopInstances
+                  - ec2:DescribeInstances
+                Resource: '*'
+
+  ProxyInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref ProxyRole
+
+  # Elastic IPs
+  ProxyEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: minecraft-proxy-eip
+
+  MinecraftEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: minecraft-server-eip
+
+  # Proxy Instance (Always On)
+  ProxyInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Sub '{{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/arm64/hvm/ebs-gp2/ami-id}}'
+      InstanceType: t4g.nano  # Only ~$3/month!
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref ProxyInstanceProfile
+      SecurityGroupIds:
+        - !Ref ProxySecurityGroup
+      SubnetId: !Ref PublicSubnetId
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          
+          # Install Docker and Git
+          apt-get update
+          apt-get install -y docker.io git awscli
+          systemctl enable docker
+          systemctl start docker
+          
+          # Clone repository and build Gate proxy
+          cd /opt
+          git clone ${GitRepoUrl} minecraft-hibernated-server
+          cd minecraft-hibernated-server/gate-proxy
+          
+          # Set environment variables for Gate proxy
+          cat > /etc/environment << 'EOF'
+          MINECRAFT_INSTANCE_ID=${MinecraftInstance}
+          MINECRAFT_ELASTIC_IP=${MinecraftEIP}
+          AWS_REGION=${AWS::Region}
+          MINECRAFT_PORT=${MinecraftPort}
+          EOF
+          
+          # Build and run Gate proxy in Docker
+          docker build -t gate-proxy .
+          
+          # Create systemd service for Gate proxy
+          cat > /etc/systemd/system/gate-proxy.service << 'EOF'
+          [Unit]
+          Description=Gate Minecraft Proxy
+          After=docker.service
+          Requires=docker.service
+          
+          [Service]
+          Type=simple
+          EnvironmentFile=/etc/environment
+          ExecStart=/usr/bin/docker run --rm --name gate-proxy \
+            -p ${MinecraftPort}:25565 \
+            -e MINECRAFT_INSTANCE_ID=${MinecraftInstance} \
+            -e MINECRAFT_ELASTIC_IP=${MinecraftEIP} \
+            -e AWS_REGION=${AWS::Region} \
+            gate-proxy
+          ExecStop=/usr/bin/docker stop gate-proxy
+          Restart=always
+          RestartSec=10
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          systemctl enable gate-proxy
+          systemctl start gate-proxy
+          
+          # Associate EIP
+          INSTANCE_ID=$(ec2-metadata --instance-id | cut -d ' ' -f 2)
+          aws ec2 associate-address --instance-id $INSTANCE_ID --allocation-id ${ProxyEIP.AllocationId} --region ${AWS::Region}
+      Tags:
+        - Key: Name
+          Value: minecraft-proxy
+        - Key: Purpose
+          Value: minecraft-proxy
+
+  # IAM Role for Minecraft Server
+  MinecraftRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: MinecraftServerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource: '*'  # For backup functionality
+
+  MinecraftInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref MinecraftRole
+
+  # Minecraft Server Instance (Hibernated Spot)
+  MinecraftInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Sub '{{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/arm64/hvm/ebs-gp2/ami-id}}'
+      InstanceType: m8g.large
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref MinecraftInstanceProfile
+      SecurityGroupIds:
+        - !Ref MinecraftSecurityGroup
+      SubnetId: !Ref PublicSubnetId
+      InstanceMarketOptions:
+        MarketType: spot
+        SpotOptions:
+          InstanceInterruptionBehavior: hibernate
+          SpotInstanceType: persistent
+      HibernationOptions:
+        Configured: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          
+          # Update system
+          apt-get update
+          apt-get upgrade -y
+          
+          # Install required packages
+          apt-get install -y git curl wget openjdk-17-jre-headless cockpit awscli
+          
+          # Enable hibernation support
+          echo 'GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT resume=UUID=$(findfs LABEL=cloudimg-rootfs)"' >> /etc/default/grub
+          update-grub
+          
+          # Create swap file for hibernation (8GB for m8g.large)
+          fallocate -l 8G /swapfile
+          chmod 600 /swapfile
+          mkswap /swapfile
+          swapon /swapfile
+          echo '/swapfile none swap sw 0 0' >> /etc/fstab
+          
+          # Clone repository and install
+          cd /opt
+          git clone ${GitRepoUrl} minecraft-hibernated-server
+          cd minecraft-hibernated-server
+          chmod +x scripts/server/setup-server.sh
+          ./scripts/server/setup-server.sh
+          
+          # Install minecraft-server (Edenhofer's systemd version)
+          wget -O /tmp/minecraft-server.deb https://github.com/Edenhofer/minecraft-server/releases/latest/download/minecraft-server_latest_all.deb
+          dpkg -i /tmp/minecraft-server.deb || apt-get install -f -y
+          
+          # Configure minecraft server directory
+          mkdir -p /srv/minecraft
+          chown minecraft:minecraft /srv/minecraft
+          
+          # Enable and start cockpit
+          systemctl enable cockpit.socket
+          systemctl start cockpit.socket
+          
+          # Associate EIP
+          INSTANCE_ID=$(ec2-metadata --instance-id | cut -d ' ' -f 2)
+          aws ec2 associate-address --instance-id $INSTANCE_ID --allocation-id ${MinecraftEIP.AllocationId} --region ${AWS::Region}
+          
+          # Download Minecraft server jar (latest)
+          cd /srv/minecraft
+          wget -O server.jar https://launcher.mojang.com/v1/objects/$(curl -s https://launcher.mojang.com/mc/game/version_manifest.json | python3 -c "import sys, json; print(json.load(sys.stdin)['latest']['release'])" | xargs -I {} curl -s https://launcher.mojang.com/mc/game/version_manifest.json | python3 -c "import sys, json; data=json.load(sys.stdin); version='{}'; print([v for v in data['versions'] if v['id']==version][0]['url'])" | xargs curl -s | python3 -c "import sys, json; print(json.load(sys.stdin)['downloads']['server']['url'])")
+          
+          # Accept EULA
+          echo "eula=true" > eula.txt
+          chown -R minecraft:minecraft /srv/minecraft
+          
+          # Enable minecraft service but don't start yet (will start on first connection)
+          systemctl enable minecraft
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            DeleteOnTermination: false  # Preserve world data
+      Tags:
+        - Key: Name
+          Value: minecraft-server
+        - Key: Purpose
+          Value: minecraft-server
+
+  # DNS Record
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: CreateDNS
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      TTL: 300
+      ResourceRecords:
+        - !Ref ProxyEIP
+
+Outputs:
+  ProxyIP:
+    Description: IP address for Minecraft connections
+    Value: !Ref ProxyEIP
+  
+  MinecraftServerIP:
+    Description: Direct IP of Minecraft server (for admin access)
+    Value: !Ref MinecraftEIP
+  
+  ConnectionEndpoint:
+    Description: Where players should connect
+    Value: !If 
+      - CreateDNS
+      - !Ref DomainName
+      - !Ref ProxyEIP

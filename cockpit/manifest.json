@@ -1,0 +1,7 @@
+{
+    "version": 0,
+    "name": "minecraft",
+    "label": "Minecraft Server",
+    "icon": "cube",
+    "content-security-policy": "default-src 'self' 'unsafe-inline' 'unsafe-eval'"
+}

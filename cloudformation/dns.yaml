@@ -1,0 +1,92 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Minecraft Hibernated Server - DNS Configuration'
+
+Parameters:
+  DomainName:
+    Type: String
+    Description: Domain name for the Minecraft server
+    AllowedPattern: '^[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9]$'
+    ConstraintDescription: Must be a valid domain name
+
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Description: Route53 Hosted Zone ID for the domain
+
+  ProxyElasticIP:
+    Type: String
+    Description: Gate proxy Elastic IP address
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}$'
+    ConstraintDescription: Must be a valid IP address
+
+Resources:
+  # A Record for Minecraft server pointing to Gate proxy
+  MinecraftARecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      TTL: 300
+      ResourceRecords:
+        - !Ref ProxyElasticIP
+      Comment: !Sub 'Minecraft server endpoint for ${AWS::StackName}'
+
+  # Optional: Create a wildcard record for subdomains
+  WildcardARecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub '*.${DomainName}'
+      Type: A
+      TTL: 300
+      ResourceRecords:
+        - !Ref ProxyElasticIP
+      Comment: !Sub 'Wildcard record for ${AWS::StackName} subdomains'
+
+  # Optional: TXT record for server information
+  ServerInfoTXTRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub '_minecraft._tcp.${DomainName}'
+      Type: TXT
+      TTL: 300
+      ResourceRecords:
+        - !Sub '"Minecraft Hibernated Server - Auto-scaling for cost efficiency"'
+      Comment: !Sub 'Server information for ${AWS::StackName}'
+
+  # SRV record for Minecraft service discovery (optional but recommended)
+  MinecraftSRVRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub '_minecraft._tcp.${DomainName}'
+      Type: SRV
+      TTL: 300
+      ResourceRecords:
+        - '0 5 25565 ${DomainName}.'
+      Comment: !Sub 'Minecraft SRV record for ${AWS::StackName}'
+
+Outputs:
+  DomainName:
+    Description: Configured domain name for Minecraft server
+    Value: !Ref DomainName
+    Export:
+      Name: !Sub '${AWS::StackName}-DomainName'
+
+  MinecraftEndpoint:
+    Description: Full Minecraft connection endpoint
+    Value: !Sub '${DomainName}:25565'
+    Export:
+      Name: !Sub '${AWS::StackName}-MinecraftEndpoint'
+
+  DNSConfiguration:
+    Description: DNS configuration summary
+    Value: !Sub 
+      - |
+        Domain: ${DomainName}
+        Points to: ${ProxyIP}
+        SRV Record: _minecraft._tcp.${DomainName}
+        TTL: 300 seconds
+      - DomainName: !Ref DomainName
+        ProxyIP: !Ref ProxyElasticIP

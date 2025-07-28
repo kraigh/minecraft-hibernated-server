@@ -1,0 +1,7 @@
+[Unit]
+Description=Check if Minecraft server is idle
+After=minecraft.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/minecraft-idle-monitor.sh

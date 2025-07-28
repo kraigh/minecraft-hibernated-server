@@ -1,0 +1,11 @@
+[Unit]
+Description=Hibernate EC2 instance when Minecraft stops
+After=minecraft.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/minecraft-hibernation.sh
+
+[Install]
+WantedBy=minecraft.service

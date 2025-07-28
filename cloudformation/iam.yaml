@@ -1,0 +1,219 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Minecraft Hibernated Server - IAM Roles and Policies'
+
+Parameters:
+  S3BackupBucket:
+    Type: String
+    Description: S3 bucket name for backups (empty if backups disabled)
+    Default: ''
+
+  EnableBackups:
+    Type: String
+    Description: Whether backups are enabled
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+
+Conditions:
+  BackupsEnabled: !Equals [!Ref EnableBackups, 'true']
+
+Resources:
+  # IAM Role for Gate Proxy
+  ProxyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-proxy-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+      Policies:
+        - PolicyName: MinecraftProxyPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # EC2 instance management permissions
+              - Effect: Allow
+                Action:
+                  - ec2:StartInstances
+                  - ec2:StopInstances
+                  - ec2:RebootInstances
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceStatus
+                  - ec2:AssociateAddress
+                  - ec2:DisassociateAddress
+                  - ec2:DescribeAddresses
+                Resource: '*'
+              
+              # CloudWatch metrics and logging
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                Resource: '*'
+              
+              # Systems Manager for secure parameter access
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/minecraft/*'
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-proxy-role'
+        - Key: Purpose
+          Value: gate-proxy-permissions
+
+  ProxyInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${AWS::StackName}-proxy-instance-profile'
+      Roles:
+        - !Ref ProxyRole
+
+  # IAM Role for Minecraft Server
+  MinecraftRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-minecraft-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+      Policies:
+        - PolicyName: MinecraftServerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Basic EC2 permissions for self-management
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceStatus
+                  - ec2:AssociateAddress
+                  - ec2:DisassociateAddress
+                  - ec2:DescribeAddresses
+                  - ec2:CreateTags
+                Resource: '*'
+              
+              # CloudWatch metrics and logging
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                Resource: '*'
+              
+              # Systems Manager for configuration
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                  - ssm:PutParameter
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/minecraft/*'
+              
+              # S3 backup permissions (conditional)
+              - !If
+                - BackupsEnabled
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:PutObject
+                    - s3:DeleteObject
+                    - s3:ListBucket
+                    - s3:GetBucketLocation
+                  Resource:
+                    - !Sub 'arn:aws:s3:::${S3BackupBucket}'
+                    - !Sub 'arn:aws:s3:::${S3BackupBucket}/*'
+                - !Ref 'AWS::NoValue'
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-minecraft-role'
+        - Key: Purpose
+          Value: minecraft-server-permissions
+
+  MinecraftInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${AWS::StackName}-minecraft-instance-profile'
+      Roles:
+        - !Ref MinecraftRole
+
+  # CloudWatch Log Groups
+  ProxyLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/ec2/${AWS::StackName}/gate-proxy'
+      RetentionInDays: 7
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-proxy-logs'
+
+  MinecraftLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/ec2/${AWS::StackName}/minecraft-server'
+      RetentionInDays: 14
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-minecraft-logs'
+
+  SystemLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/ec2/${AWS::StackName}/system'
+      RetentionInDays: 3
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-system-logs'
+
+Outputs:
+  ProxyRoleArn:
+    Description: ARN of the Gate proxy IAM role
+    Value: !GetAtt ProxyRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ProxyRoleArn'
+
+  MinecraftRoleArn:
+    Description: ARN of the Minecraft server IAM role
+    Value: !GetAtt MinecraftRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-MinecraftRoleArn'
+
+  ProxyInstanceProfile:
+    Description: Instance profile for Gate proxy
+    Value: !Ref ProxyInstanceProfile
+    Export:
+      Name: !Sub '${AWS::StackName}-ProxyInstanceProfile'
+
+  MinecraftInstanceProfile:
+    Description: Instance profile for Minecraft server
+    Value: !Ref MinecraftInstanceProfile
+    Export:
+      Name: !Sub '${AWS::StackName}-MinecraftInstanceProfile'
+
+  ProxyLogGroupName:
+    Description: CloudWatch log group for Gate proxy
+    Value: !Ref ProxyLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-ProxyLogGroup'
+
+  MinecraftLogGroupName:
+    Description: CloudWatch log group for Minecraft server
+    Value: !Ref MinecraftLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-MinecraftLogGroup'

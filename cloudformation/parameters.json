@@ -1,0 +1,92 @@
+[
+  {
+    "ParameterKey": "KeyPairName",
+    "ParameterValue": "my-minecraft-key",
+    "Description": "REQUIRED: Your EC2 key pair name for SSH access"
+  },
+  {
+    "ParameterKey": "HomeIP", 
+    "ParameterValue": "1.1.1.1/32",
+    "Description": "REQUIRED: Your public IP for SSH/Cockpit access (get from https://whatismyipaddress.com/)"
+  },
+  {
+    "ParameterKey": "GitRepoUrl",
+    "ParameterValue": "https://github.com/kraigh/minecraft-hibernated-server",
+    "Description": "REQUIRED: Your fork of the minecraft-hibernated-server repository"
+  },
+  {
+    "ParameterKey": "UseDefaultVPC",
+    "ParameterValue": "true",
+    "Description": "Use default VPC (recommended for simple setup)"
+  },
+  {
+    "ParameterKey": "VpcId",
+    "ParameterValue": "",
+    "Description": "Only required if UseDefaultVPC is false"
+  },
+  {
+    "ParameterKey": "PublicSubnetId",
+    "ParameterValue": "",
+    "Description": "Only required if UseDefaultVPC is false"
+  },
+  {
+    "ParameterKey": "DomainName",
+    "ParameterValue": "",
+    "Description": "OPTIONAL: Custom domain (e.g., minecraft.example.com)"
+  },
+  {
+    "ParameterKey": "HostedZoneId", 
+    "ParameterValue": "",
+    "Description": "OPTIONAL: Route53 hosted zone ID (required only if using custom domain)"
+  },
+  {
+    "ParameterKey": "MinecraftPort",
+    "ParameterValue": "25565",
+    "Description": "Minecraft server port (default: 25565)"
+  },
+  {
+    "ParameterKey": "MinecraftVersion",
+    "ParameterValue": "latest",
+    "Description": "Minecraft version (latest, 1.21, 1.20.6, etc.)"
+  },
+  {
+    "ParameterKey": "ServerType",
+    "ParameterValue": "vanilla",
+    "Description": "Server type (vanilla, paper, forge, fabric)"
+  },
+  {
+    "ParameterKey": "JavaMemory",
+    "ParameterValue": "6G",
+    "Description": "Java memory allocation (2G, 4G, 6G, 8G, 12G, 16G)"
+  },
+  {
+    "ParameterKey": "IdleMinutes",
+    "ParameterValue": "20",
+    "Description": "Minutes of inactivity before hibernation (5-120)"
+  },
+  {
+    "ParameterKey": "MinecraftInstanceType",
+    "ParameterValue": "m8g.large",
+    "Description": "EC2 instance type for Minecraft server"
+  },
+  {
+    "ParameterKey": "ProxyInstanceType",
+    "ParameterValue": "t4g.nano",
+    "Description": "EC2 instance type for Gate proxy (keep small for cost)"
+  },
+  {
+    "ParameterKey": "SpotMaxPrice",
+    "ParameterValue": "",
+    "Description": "OPTIONAL: Max spot price (empty = on-demand price)"
+  },
+  {
+    "ParameterKey": "EnableBackups",
+    "ParameterValue": "true",
+    "Description": "Enable automatic S3 backups"
+  },
+  {
+    "ParameterKey": "S3BackupBucket",
+    "ParameterValue": "",
+    "Description": "OPTIONAL: S3 bucket name (will be created if empty)"
+  }
+]

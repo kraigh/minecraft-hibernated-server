@@ -1,0 +1,48 @@
+# Development files
+CLAUDE.md
+
+# Binaries
+gate-proxy/gate-proxy
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go test files
+*.test
+*.out
+
+# Go coverage files
+*.cover
+coverage.txt
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# AWS/CloudFormation
+*.pem
+*.key
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+/tmp/
+
+# Node modules (if any)
+node_modules/
+
+# Build artifacts
+dist/
+build/

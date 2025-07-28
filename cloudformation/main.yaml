@@ -1,0 +1,383 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Minecraft Hibernated Server - Complete Infrastructure Stack'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Required Configuration"
+        Parameters:
+          - KeyPairName
+          - HomeIP
+          - GitRepoUrl
+      - Label:
+          default: "Network Configuration"
+        Parameters:
+          - UseDefaultVPC
+          - VpcId
+          - PublicSubnetId
+      - Label:
+          default: "DNS Configuration (Optional)"
+        Parameters:
+          - DomainName
+          - HostedZoneId
+      - Label:
+          default: "Minecraft Server Configuration"
+        Parameters:
+          - MinecraftPort
+          - MinecraftVersion
+          - ServerType
+          - JavaMemory
+          - IdleMinutes
+      - Label:
+          default: "Instance Configuration"
+        Parameters:
+          - MinecraftInstanceType
+          - ProxyInstanceType
+          - SpotMaxPrice
+          - EnableBackups
+          - S3BackupBucket
+    ParameterLabels:
+      KeyPairName:
+        default: "EC2 Key Pair"
+      HomeIP:
+        default: "Your Public IP"
+      GitRepoUrl:
+        default: "Git Repository URL"
+      UseDefaultVPC:
+        default: "Use Default VPC"
+      DomainName:
+        default: "Custom Domain Name"
+      MinecraftVersion:
+        default: "Minecraft Version"
+      ServerType:
+        default: "Server Type"
+
+Parameters:
+  # Required Parameters
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH access to instances
+    ConstraintDescription: Must be an existing EC2 Key Pair
+
+  HomeIP:
+    Type: String
+    Description: Your public IP address for SSH and Cockpit access (format: x.x.x.x/32)
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/32$'
+    ConstraintDescription: Must be a valid IP address in CIDR format (e.g., 203.0.113.1/32)
+
+  GitRepoUrl:
+    Type: String
+    Description: Git repository URL containing your fork of minecraft-hibernated-server
+    Default: https://github.com/kraigh/minecraft-hibernated-server
+    AllowedPattern: '^https://github\.com/[^/]+/[^/]+$'
+    ConstraintDescription: Must be a valid GitHub repository URL
+
+  # Network Configuration
+  UseDefaultVPC:
+    Type: String
+    Description: Use default VPC and subnet (recommended for simple setup)
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+
+  VpcId:
+    Type: String
+    Description: VPC ID (only required if UseDefaultVPC is false)
+    Default: ''
+
+  PublicSubnetId:
+    Type: String
+    Description: Public subnet ID (only required if UseDefaultVPC is false)  
+    Default: ''
+
+  # DNS Configuration (Optional)
+  DomainName:
+    Type: String
+    Description: Custom domain name for Minecraft server (e.g., minecraft.example.com)
+    Default: ''
+    AllowedPattern: '^$|^[a-zA-Z0-9][a-zA-Z0-9\-\.]*[a-zA-Z0-9]$'
+    ConstraintDescription: Must be a valid domain name or empty
+
+  HostedZoneId:
+    Type: String
+    Description: Route53 Hosted Zone ID (required only if using custom domain)
+    Default: ''
+    AllowedPattern: '^$|^Z[A-Z0-9]+$'
+    ConstraintDescription: Must be a valid Route53 Hosted Zone ID or empty
+
+  # Minecraft Configuration
+  MinecraftPort:
+    Type: Number
+    Description: Port for Minecraft server connections
+    Default: 25565
+    MinValue: 1024
+    MaxValue: 65535
+    ConstraintDescription: Must be between 1024 and 65535
+
+  MinecraftVersion:
+    Type: String
+    Description: Minecraft server version to install
+    Default: 'latest'
+    AllowedValues: ['latest', '1.21', '1.20.6', '1.20.4', '1.20.1', '1.19.4']
+
+  ServerType:
+    Type: String
+    Description: Type of Minecraft server to install
+    Default: 'vanilla'
+    AllowedValues: ['vanilla', 'paper', 'forge', 'fabric']
+
+  JavaMemory:
+    Type: String
+    Description: Java memory allocation for Minecraft server
+    Default: '6G'
+    AllowedValues: ['2G', '4G', '6G', '8G', '12G', '16G']
+
+  IdleMinutes:
+    Type: Number
+    Description: Minutes of inactivity before server hibernates
+    Default: 20
+    MinValue: 5
+    MaxValue: 120
+    ConstraintDescription: Must be between 5 and 120 minutes
+
+  # Instance Configuration
+  MinecraftInstanceType:
+    Type: String
+    Description: EC2 instance type for Minecraft server
+    Default: 'm8g.large'
+    AllowedValues: 
+      - 't4g.large'
+      - 't4g.xlarge'
+      - 'm8g.large'
+      - 'm8g.xlarge'
+      - 'm8g.2xlarge'
+      - 'c8g.large'
+      - 'c8g.xlarge'
+
+  ProxyInstanceType:
+    Type: String
+    Description: EC2 instance type for Gate proxy (keep small for cost)
+    Default: 't4g.nano'
+    AllowedValues: ['t4g.nano', 't4g.micro', 't4g.small']
+
+  SpotMaxPrice:
+    Type: String
+    Description: Maximum spot price (leave empty for on-demand price)
+    Default: ''
+    AllowedPattern: '^$|^\d+\.\d{1,6}$'
+    ConstraintDescription: Must be empty or a valid price (e.g., 0.05)
+
+  # Backup Configuration
+  EnableBackups:
+    Type: String
+    Description: Enable automatic S3 backups of world data
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+
+  S3BackupBucket:
+    Type: String
+    Description: S3 bucket name for backups (will be created if doesn't exist)
+    Default: ''
+    AllowedPattern: '^$|^[a-z0-9][a-z0-9\-]*[a-z0-9]$'
+    ConstraintDescription: Must be a valid S3 bucket name or empty
+
+Conditions:
+  UseDefaultVPCCondition: !Equals [!Ref UseDefaultVPC, 'true']
+  UseCustomVPCCondition: !Equals [!Ref UseDefaultVPC, 'false']
+  CreateDNS: !Not [!Equals [!Ref DomainName, '']]
+  EnableBackupsCondition: !Equals [!Ref EnableBackups, 'true']
+  CreateBackupBucket: !And
+    - !Condition EnableBackupsCondition
+    - !Equals [!Ref S3BackupBucket, '']
+  UseCustomSpotPrice: !Not [!Equals [!Ref SpotMaxPrice, '']]
+
+Resources:
+  # S3 Backup Bucket
+  BackupBucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateBackupBucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-minecraft-backups-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldBackups
+            Status: Enabled
+            ExpirationInDays: 30
+            NoncurrentVersionExpirationInDays: 7
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-minecraft-backups'
+        - Key: Purpose
+          Value: minecraft-world-backups
+
+  # Network Stack (creates VPC if needed)
+  NetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: UseDefaultVPCCondition
+    Properties:
+      TemplateURL: network.yaml
+      Parameters:
+        StackName: !Ref AWS::StackName
+
+  # Security Groups Stack
+  SecurityStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: security.yaml
+      Parameters:
+        VpcId: !If
+          - UseDefaultVPCCondition
+          - !GetAtt NetworkStack.Outputs.VpcId
+          - !Ref VpcId
+        HomeIP: !Ref HomeIP
+        MinecraftPort: !Ref MinecraftPort
+
+  # IAM Roles Stack
+  IAMStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: iam.yaml
+      Parameters:
+        S3BackupBucket: !If
+          - CreateBackupBucket
+          - !Ref BackupBucket
+          - !Ref S3BackupBucket
+        EnableBackups: !Ref EnableBackups
+
+  # Gate Proxy Stack
+  ProxyStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: [SecurityStack, IAMStack]
+    Properties:
+      TemplateURL: proxy.yaml
+      Parameters:
+        KeyPairName: !Ref KeyPairName
+        ProxyInstanceType: !Ref ProxyInstanceType
+        SecurityGroupId: !GetAtt SecurityStack.Outputs.ProxySecurityGroupId
+        SubnetId: !If
+          - UseDefaultVPCCondition
+          - !GetAtt NetworkStack.Outputs.PublicSubnetId
+          - !Ref PublicSubnetId
+        IAMInstanceProfile: !GetAtt IAMStack.Outputs.ProxyInstanceProfile
+        GitRepoUrl: !Ref GitRepoUrl
+        MinecraftPort: !Ref MinecraftPort
+
+  # Minecraft Server Stack
+  MinecraftStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: [SecurityStack, IAMStack, ProxyStack]
+    Properties:
+      TemplateURL: minecraft.yaml
+      Parameters:
+        KeyPairName: !Ref KeyPairName
+        MinecraftInstanceType: !Ref MinecraftInstanceType
+        SecurityGroupId: !GetAtt SecurityStack.Outputs.MinecraftSecurityGroupId
+        SubnetId: !If
+          - UseDefaultVPCCondition
+          - !GetAtt NetworkStack.Outputs.PublicSubnetId
+          - !Ref PublicSubnetId
+        IAMInstanceProfile: !GetAtt IAMStack.Outputs.MinecraftInstanceProfile
+        GitRepoUrl: !Ref GitRepoUrl
+        MinecraftVersion: !Ref MinecraftVersion
+        ServerType: !Ref ServerType
+        JavaMemory: !Ref JavaMemory
+        IdleMinutes: !Ref IdleMinutes
+        SpotMaxPrice: !Ref SpotMaxPrice
+        S3BackupBucket: !If
+          - CreateBackupBucket
+          - !Ref BackupBucket
+          - !Ref S3BackupBucket
+        EnableBackups: !Ref EnableBackups
+        ProxyElasticIP: !GetAtt ProxyStack.Outputs.ElasticIP
+
+  # DNS Stack (optional)
+  DNSStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: CreateDNS
+    DependsOn: ProxyStack
+    Properties:
+      TemplateURL: dns.yaml
+      Parameters:
+        DomainName: !Ref DomainName
+        HostedZoneId: !Ref HostedZoneId
+        ProxyElasticIP: !GetAtt ProxyStack.Outputs.ElasticIP
+
+Outputs:
+  ConnectionEndpoint:
+    Description: Minecraft server connection endpoint for players
+    Value: !If
+      - CreateDNS
+      - !Sub '${DomainName}:${MinecraftPort}'
+      - !Sub '${ProxyStack.Outputs.ElasticIP}:${MinecraftPort}'
+    Export:
+      Name: !Sub '${AWS::StackName}-ConnectionEndpoint'
+
+  ProxyPublicIP:
+    Description: Gate proxy public IP address
+    Value: !GetAtt ProxyStack.Outputs.ElasticIP
+    Export:
+      Name: !Sub '${AWS::StackName}-ProxyIP'
+
+  MinecraftServerIP:
+    Description: Minecraft server public IP address (for direct admin access)
+    Value: !GetAtt MinecraftStack.Outputs.ElasticIP
+    Export:
+      Name: !Sub '${AWS::StackName}-MinecraftIP'
+
+  CockpitURL:
+    Description: Cockpit web management interface
+    Value: !Sub 'https://${MinecraftStack.Outputs.ElasticIP}:9090'
+    Export:
+      Name: !Sub '${AWS::StackName}-CockpitURL'
+
+  SSHCommands:
+    Description: SSH connection commands
+    Value: !Sub 
+      - |
+        Proxy: ssh -i ~/.ssh/${KeyPairName}.pem ubuntu@${ProxyIP}
+        Server: ssh -i ~/.ssh/${KeyPairName}.pem ubuntu@${ServerIP}
+      - KeyPairName: !Ref KeyPairName
+        ProxyIP: !GetAtt ProxyStack.Outputs.ElasticIP
+        ServerIP: !GetAtt MinecraftStack.Outputs.ElasticIP
+
+  EstimatedMonthlyCost:
+    Description: Estimated monthly cost breakdown
+    Value: !Sub
+      - |
+        Gate Proxy (${ProxyInstanceType}): ~$3.00/month
+        Minecraft Server (${MinecraftInstanceType} spot): ~$0.030/hour when running
+        EBS Storage (30GB): ~$2.40/month
+        Elastic IPs: Free when attached
+        Total: ~$6-15/month depending on usage
+      - ProxyInstanceType: !Ref ProxyInstanceType
+        MinecraftInstanceType: !Ref MinecraftInstanceType
+
+  BackupBucket:
+    Condition: EnableBackupsCondition
+    Description: S3 bucket for world backups
+    Value: !If
+      - CreateBackupBucket
+      - !Ref BackupBucket
+      - !Ref S3BackupBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-BackupBucket'
+
+  DeploymentInstructions:
+    Description: Next steps after deployment
+    Value: |
+      1. Wait for all instances to complete initialization (~5-10 minutes)
+      2. Connect your Minecraft client to the connection endpoint above
+      3. Server will automatically start when you connect (may take 60-90 seconds)
+      4. Access Cockpit web UI for server management
+      5. Server will hibernate after 20 minutes of inactivity to save costs

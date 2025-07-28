@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Minecraft Server Control</title>
+    <meta charset="utf-8">
+    <link href="../base1/cockpit.css" type="text/css" rel="stylesheet">
+    <script src="../base1/cockpit.js"></script>
+    <script src="minecraft.js"></script>
+</head>
+<body>
+    <div class="container-fluid">
+        <h2>Minecraft Server Control</h2>
+        
+        <div class="panel panel-default">
+            <div class="panel-heading">Server Status</div>
+            <div class="panel-body">
+                <div id="status">Loading...</div>
+                <button id="start-btn" class="btn btn-success">Start Server</button>
+                <button id="stop-btn" class="btn btn-danger">Stop Server</button>
+                <button id="restart-btn" class="btn btn-warning">Restart Server</button>
+            </div>
+        </div>
+        
+        <div class="panel panel-default">
+            <div class="panel-heading">Quick Commands</div>
+            <div class="panel-body">
+                <button id="save-btn" class="btn btn-primary">Save World</button>
+                <button id="backup-btn" class="btn btn-primary">Backup</button>
+                <button id="hibernate-btn" class="btn btn-warning">Hibernate Instance</button>
+            </div>
+        </div>
+        
+        <div class="panel panel-default">
+            <div class="panel-heading">Console Command</div>
+            <div class="panel-body">
+                <input type="text" id="command-input" class="form-control" placeholder="Enter command">
+                <button id="send-cmd-btn" class="btn btn-primary">Send</button>
+            </div>
+        </div>
+        
+        <div class="panel panel-default">
+            <div class="panel-heading">Server Logs</div>
+            <div class="panel-body">
+                <pre id="logs" style="height: 300px; overflow-y: scroll;"></pre>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
